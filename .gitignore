@@ -1,13 +1,30 @@
+# Virtual environment
 .venv/
 venv/
-__pychace__/
+
+# Python cache
+__pycache__/
 *.pyc
+.pytest_cache/
+
+# Local audio files
 data/
 *.mp3
 *.wav
 *.flac
 *.m4a
 *.ogg
+
+# Generated mixes
+output/
+
+# Secrets
 .env
 .env.*
+
+# OS files
 .DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
