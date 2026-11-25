@@ -7,6 +7,50 @@ import streamlit as st
 
 from audio_io import save_uploaded_audio
 from mixer import create_mix
+from song_order import (
+    OrderProvider,
+    UploadedSong,
+    mock_song_order,
+    optimizer_provider,
+    validate_song_order,
+)
+
+
+def set_song_order(order: list[str]) -> None:
+    if order != st.session_state.get("song_order", []):
+        st.session_state.song_order = order
+        st.session_state.mix_settings = None
+
+
+def move_song(song_id: str, offset: int) -> None:
+    order = list(st.session_state.song_order)
+    if song_id not in order:
+        return
+    index = order.index(song_id)
+    target = index + offset
+    if 0 <= target < len(order):
+        order[index], order[target] = order[target], order[index]
+        set_song_order(order)
+
+
+def apply_recommendation(
+    provider: OrderProvider,
+    order: list[str],
+    songs_by_id: dict[str, UploadedSong],
+) -> bool:
+    # Give the provider a snapshot, in playback order.
+    provider_input = {song_id: songs_by_id[song_id].copy() for song_id in order}
+    try:
+        proposed_order = provider(provider_input)
+    except Exception as error:
+        st.error(f"곡 순서를 가져오지 못했습니다. {error}")
+        return False
+    try:
+        set_song_order(validate_song_order(proposed_order, songs_by_id))
+    except ValueError as error:
+        st.error(f"곡 순서를 반영하지 못했습니다. {error}")
+        return False
+    return True
 
 
 st.set_page_config(page_title="MeloLink", page_icon="🎵")
@@ -24,10 +68,10 @@ uploaded_files = st.file_uploader(
     "음악 파일",
     type=["mp3", "wav"],
     accept_multiple_files=True,
-    help="곡은 업로드 목록에 표시된 순서대로 연결됩니다.",
+    help="업로드 후 아래의 위로·아래로 버튼으로 연결 순서를 바꿀 수 있습니다.",
 )
 
-songs = []
+songs_by_id: dict[str, UploadedSong] = {}
 for uploaded_file in uploaded_files:
     name = Path(uploaded_file.name).name
     key = (Path(name).suffix.lower(), hashlib.sha256(uploaded_file.getbuffer()).digest())
@@ -38,7 +82,7 @@ for uploaded_file in uploaded_files:
     try:
         if key not in upload_cache:
             upload_cache[key] = save_uploaded_audio(uploaded_file, str(work_dir / "uploads"))
-        songs.append({**upload_cache[key], "name": name})
+        songs_by_id[uploaded_file.file_id] = {**upload_cache[key], "name": name}
     except FileNotFoundError as error:
         if error.filename == "ffprobe":
             st.error("ffprobe를 찾을 수 없습니다. FFmpeg가 설치되어 있고 실행 경로에 있는지 확인하세요.")
@@ -49,11 +93,41 @@ for uploaded_file in uploaded_files:
     except OSError as error:
         st.error(f"{name} 파일을 저장하거나 검사하지 못했습니다. {error.strerror or error}")
 
+previous_order = st.session_state.get("song_order", [])
+upload_ids = {uploaded_file.file_id for uploaded_file in uploaded_files}
+order = [file_id for file_id in previous_order if file_id in songs_by_id]
+order.extend(file_id for file_id in songs_by_id if file_id not in previous_order)
+if upload_ids != st.session_state.get("upload_ids", set()):
+    st.session_state.mix_settings = None
+set_song_order(order)
+st.session_state.upload_ids = upload_ids
+
+can_mix_uploads = len(songs_by_id) >= 2 and len(songs_by_id) == len(uploaded_files)
+if songs_by_id:
+    st.subheader("곡 순서")
+    if optimizer_provider is None:
+        st.caption("자동 추천 기능은 연결 대기 중입니다. 테스트용 순서는 현재 순서를 역순으로 바꿉니다.")
+        if st.button("테스트용 순서 적용", disabled=not can_mix_uploads):
+            if apply_recommendation(mock_song_order, order, songs_by_id):
+                st.success("테스트용 순서를 적용했습니다.")
+    elif st.button("자동 추천 순서 적용", disabled=not can_mix_uploads):
+        if apply_recommendation(optimizer_provider, order, songs_by_id):
+            st.success("자동 추천 순서를 적용했습니다.")
+    order = st.session_state.get("song_order", [])
+
+songs = [songs_by_id[file_id] for file_id in order]
 if songs:
-    st.table([
-        {"순서": index, "파일": song["name"], "재생 시간(초)": round(song["duration"], 2)}
-        for index, song in enumerate(songs, start=1)
-    ])
+    for index, (file_id, song) in enumerate(zip(order, songs)):
+        details, up, down = st.columns([5, 1, 1])
+        details.text(f'{index + 1}. {song["name"]} ({song["duration"]:.2f}초)')
+        up.button(
+            "위로", key=f"up_{file_id}", disabled=index == 0,
+            on_click=move_song, args=(file_id, -1),
+        )
+        down.button(
+            "아래로", key=f"down_{file_id}", disabled=index == len(order) - 1,
+            on_click=move_song, args=(file_id, 1),
+        )
 
 fade = st.slider("크로스페이드 길이(초)", 0.1, 30.0, 5.0, 0.1)
 short_tracks = [song["name"] for song in songs if song["duration"] <= fade]
@@ -68,7 +142,7 @@ output = work_dir / "melolink_mix.wav"
 if st.button(
     "믹스 만들기",
     type="primary",
-    disabled=len(songs) < 2 or len(songs) != len(uploaded_files) or bool(short_tracks),
+    disabled=not can_mix_uploads or bool(short_tracks),
 ):
     pending = work_dir / "pending.wav"
     try:
