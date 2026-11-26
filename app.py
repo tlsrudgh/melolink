@@ -1,14 +1,18 @@
 import hashlib
 import subprocess
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import streamlit as st
 
+from web_preview import render_preview
 from audio_io import save_uploaded_audio
-from mixer import create_mix
+from mix_engine import FFmpegMixEngine
+from recommendation import recommendation_provider
+from song_analysis import AnalysisCache, AnalysisSettings, SongAnalysis
+from transition_planner import MixSettings, plan_transitions
 from song_order import (
-    OrderProvider,
     UploadedSong,
     mock_song_order,
     optimizer_provider,
@@ -34,14 +38,11 @@ def move_song(song_id: str, offset: int) -> None:
 
 
 def apply_recommendation(
-    provider: OrderProvider,
-    order: list[str],
+    propose_order: Callable[[], Sequence[str]],
     songs_by_id: dict[str, UploadedSong],
 ) -> bool:
-    # Give the provider a snapshot, in playback order.
-    provider_input = {song_id: songs_by_id[song_id].copy() for song_id in order}
     try:
-        proposed_order = provider(provider_input)
+        proposed_order = propose_order()
     except Exception as error:
         st.error(f"곡 순서를 가져오지 못했습니다. {error}")
         return False
@@ -62,6 +63,9 @@ if "work_dir" not in st.session_state:
     st.session_state.upload_cache = {}
     st.session_state.mix_settings = None
 
+if "analysis_cache" not in st.session_state:
+    st.session_state.analysis_cache = AnalysisCache()
+
 work_dir = Path(st.session_state.work_dir.name)
 upload_cache = st.session_state.upload_cache
 uploaded_files = st.file_uploader(
@@ -72,6 +76,7 @@ uploaded_files = st.file_uploader(
 )
 
 songs_by_id: dict[str, UploadedSong] = {}
+content_keys: dict[str, tuple[str, bytes]] = {}
 for uploaded_file in uploaded_files:
     name = Path(uploaded_file.name).name
     key = (Path(name).suffix.lower(), hashlib.sha256(uploaded_file.getbuffer()).digest())
@@ -83,6 +88,7 @@ for uploaded_file in uploaded_files:
         if key not in upload_cache:
             upload_cache[key] = save_uploaded_audio(uploaded_file, str(work_dir / "uploads"))
         songs_by_id[uploaded_file.file_id] = {**upload_cache[key], "name": name}
+        content_keys[uploaded_file.file_id] = key
     except FileNotFoundError as error:
         if error.filename == "ffprobe":
             st.error("ffprobe를 찾을 수 없습니다. FFmpeg가 설치되어 있고 실행 경로에 있는지 확인하세요.")
@@ -103,15 +109,42 @@ set_song_order(order)
 st.session_state.upload_ids = upload_ids
 
 can_mix_uploads = len(songs_by_id) >= 2 and len(songs_by_id) == len(uploaded_files)
+with st.expander("음악 분석 설정"):
+    use_rms = st.checkbox("믹스 생성 시 구간별 RMS 분석")
+    window_seconds = st.selectbox("RMS 분석 구간(초)", (1, 5, 10), index=1)
+analysis_settings = AnalysisSettings(window_seconds)
+
+
+def playlist_analysis(order: list[str], *, include_rms: bool) -> dict[str, SongAnalysis]:
+    return {
+        song_id: st.session_state.analysis_cache.get(
+            song_id, songs_by_id[song_id], content_keys[song_id], analysis_settings,
+            analyze=include_rms,
+        )
+        for song_id in order
+    }
+
+
+def catalog_in_playback_order() -> dict[str, UploadedSong]:
+    return {song_id: songs_by_id[song_id].copy() for song_id in order}
+
+
 if songs_by_id:
     st.subheader("곡 순서")
-    if optimizer_provider is None:
+    if recommendation_provider is not None:
+        if st.button("자동 추천 순서 적용", disabled=not can_mix_uploads):
+            if apply_recommendation(
+                lambda: recommendation_provider(playlist_analysis(order, include_rms=True)),
+                songs_by_id,
+            ):
+                st.success("자동 추천 순서를 적용했습니다.")
+    elif optimizer_provider is None:
         st.caption("자동 추천 기능은 연결 대기 중입니다. 테스트용 순서는 현재 순서를 역순으로 바꿉니다.")
         if st.button("테스트용 순서 적용", disabled=not can_mix_uploads):
-            if apply_recommendation(mock_song_order, order, songs_by_id):
+            if apply_recommendation(lambda: mock_song_order(catalog_in_playback_order()), songs_by_id):
                 st.success("테스트용 순서를 적용했습니다.")
     elif st.button("자동 추천 순서 적용", disabled=not can_mix_uploads):
-        if apply_recommendation(optimizer_provider, order, songs_by_id):
+        if apply_recommendation(lambda: optimizer_provider(catalog_in_playback_order()), songs_by_id):
             st.success("자동 추천 순서를 적용했습니다.")
     order = st.session_state.get("song_order", [])
 
@@ -134,8 +167,13 @@ short_tracks = [song["name"] for song in songs if song["duration"] <= fade]
 if len(songs) < 2:
     st.info("믹스를 만들려면 유효한 음악 파일을 2개 이상 올려 주세요.")
 elif short_tracks:
-    st.warning("크로스페이드 길이를 다음 곡의 재생 시간보다 짧게 설정하세요. "
+    st.warning("크로스페이드 길이를 각 곡의 재생 시간보다 짧게 설정하세요. "
                + ", ".join(short_tracks))
+
+if can_mix_uploads and not short_tracks:
+    preview_plan = plan_transitions(order, playlist_analysis(order, include_rms=False), MixSettings(fade))
+    st.subheader("전체 곡 실시간 미리 듣기")
+    render_preview(preview_plan, songs_by_id)
 
 settings = (tuple(song["path"] for song in songs), fade)
 output = work_dir / "melolink_mix.wav"
@@ -147,7 +185,13 @@ if st.button(
     pending = work_dir / "pending.wav"
     try:
         with st.spinner("곡을 연결하는 중입니다…"):
-            create_mix(list(settings[0]), fade, str(pending))
+            try:
+                analysis = playlist_analysis(order, include_rms=use_rms)
+            except (ValueError, OSError) as error:
+                st.warning(f"RMS 분석에 실패하여 재생 시간으로 전환을 계획합니다. {error}")
+                analysis = playlist_analysis(order, include_rms=False)
+            plan = plan_transitions(order, analysis, MixSettings(fade))
+            FFmpegMixEngine().render(plan, songs_by_id, pending)
             pending.replace(output)
         st.session_state.mix_settings = settings
     except FileNotFoundError as error:

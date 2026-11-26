@@ -116,3 +116,29 @@ class SongOrderAppTests(unittest.TestCase):
         for button in self.app.button:
             if button.label in {"테스트용 순서 적용", "믹스 만들기"}:
                 self.assertTrue(button.disabled)
+
+    def test_recommendation_and_export_share_content_analysis(self):
+        import recommendation
+        import song_analysis
+        import transition_planner
+
+        self.uploads[1] = audio_upload("b", 1000)
+
+        def recommend(analysis):
+            self.assertEqual(list(analysis), ["a", "b"])
+            self.assertEqual(analysis["b"].song_id, "b")
+            self.assertEqual(len(analysis["a"].segments), 2)
+            self.assertAlmostEqual(analysis["a"].segments[0].rms, 1000 / 32768)
+            return ["b", "a"]
+
+        with patch.object(recommendation, "recommendation_provider", recommend), patch.object(
+            song_analysis, "analyze_song", wraps=song_analysis.analyze_song,
+        ) as analyze, patch.object(
+            transition_planner, "plan_transitions", wraps=transition_planner.plan_transitions,
+        ) as plan:
+            self.app.run()
+            self.click("자동 추천 순서 적용")
+            self.assertEqual(self.app.session_state.song_order, ["b", "a"])
+            self.check_mix(1000, 1000)
+            self.assertEqual(analyze.call_count, 1)
+            self.assertTrue(plan.call_args.args[1]["b"].segments)

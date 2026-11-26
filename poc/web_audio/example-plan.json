@@ -1,0 +1,15 @@
+{
+  "order": [
+    "B",
+    "A"
+  ],
+  "transitions": [
+    {
+      "outgoing": "B",
+      "incoming": "A",
+      "seconds": 0.75,
+      "effect": "crossfade"
+    }
+  ],
+  "version": 1
+}

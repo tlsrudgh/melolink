@@ -2,6 +2,9 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TypedDict
 
 
+SongID = str
+
+
 class UploadedSong(TypedDict):
     name: str
     path: str
