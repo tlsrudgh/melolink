@@ -1,0 +1,27 @@
+# Python virtual environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local input audio and generated mixes
+data/
+test_audio/
+*.mix.wav
+*.mix.mp3
+outputs/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+

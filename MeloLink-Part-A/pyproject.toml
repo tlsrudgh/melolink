@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "melolink"
+version = "0.1.0"
+description = "Local music analysis for natural playlist transitions"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "librosa==1.0.1",
+  "numpy==2.5.5",
+  "scipy==1.18.1",
+  "soundfile==0.13.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.2.0"]
+
+[project.scripts]
+melolink-analyze = "melolink.analysis.analyzer:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+

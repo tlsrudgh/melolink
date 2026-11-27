@@ -9,12 +9,11 @@ import streamlit as st
 from web_preview import render_preview
 from audio_io import save_uploaded_audio
 from mix_engine import FFmpegMixEngine
-from recommendation import recommendation_provider
+from recommendation import recommend_uploaded_songs, recommendation_provider
 from song_analysis import AnalysisCache, AnalysisSettings, SongAnalysis
 from transition_planner import MixSettings, plan_transitions
 from song_order import (
     UploadedSong,
-    mock_song_order,
     optimizer_provider,
     validate_song_order,
 )
@@ -129,23 +128,23 @@ def catalog_in_playback_order() -> dict[str, UploadedSong]:
     return {song_id: songs_by_id[song_id].copy() for song_id in order}
 
 
+def recommended_order() -> Sequence[str]:
+    if recommendation_provider is not None:
+        return recommendation_provider(playlist_analysis(order, include_rms=True))
+    catalog = catalog_in_playback_order()
+    if optimizer_provider is not None:
+        return optimizer_provider(catalog)
+    if "part_a_cache" not in st.session_state:
+        st.session_state.part_a_cache = {}
+    return recommend_uploaded_songs(catalog, st.session_state.part_a_cache)
+
+
 if songs_by_id:
     st.subheader("곡 순서")
-    if recommendation_provider is not None:
-        if st.button("자동 추천 순서 적용", disabled=not can_mix_uploads):
-            if apply_recommendation(
-                lambda: recommendation_provider(playlist_analysis(order, include_rms=True)),
-                songs_by_id,
-            ):
+    if st.button("자동 추천 순서 적용", disabled=not can_mix_uploads):
+        with st.spinner("곡의 시작과 끝을 비교하고 있습니다…"):
+            if apply_recommendation(recommended_order, songs_by_id):
                 st.success("자동 추천 순서를 적용했습니다.")
-    elif optimizer_provider is None:
-        st.caption("자동 추천 기능은 연결 대기 중입니다. 테스트용 순서는 현재 순서를 역순으로 바꿉니다.")
-        if st.button("테스트용 순서 적용", disabled=not can_mix_uploads):
-            if apply_recommendation(lambda: mock_song_order(catalog_in_playback_order()), songs_by_id):
-                st.success("테스트용 순서를 적용했습니다.")
-    elif st.button("자동 추천 순서 적용", disabled=not can_mix_uploads):
-        if apply_recommendation(lambda: optimizer_provider(catalog_in_playback_order()), songs_by_id):
-            st.success("자동 추천 순서를 적용했습니다.")
     order = st.session_state.get("song_order", [])
 
 songs = [songs_by_id[file_id] for file_id in order]

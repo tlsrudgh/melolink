@@ -2,6 +2,7 @@ import shutil
 import struct
 import unittest
 import wave
+from math import pi, sin
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -61,9 +62,11 @@ class SongOrderAppTests(unittest.TestCase):
 
     def test_mock_order_manual_adjustment_and_upload_changes(self):
         self.check_mix(1000, 2000)
-        self.click("테스트용 순서 적용")
+        with patch.object(song_order, "optimizer_provider", song_order.mock_song_order):
+            self.app.run()
+            self.click("자동 추천 순서 적용")
         self.assertEqual(self.app.session_state.song_order, ["b", "a"])
-        self.assertIn("테스트용", self.app.success[0].value)
+        self.assertTrue(self.app.success)
         self.assertFalse(self.app.get("download_button"))
         self.check_mix(2000, 1000)
 
@@ -114,7 +117,7 @@ class SongOrderAppTests(unittest.TestCase):
         self.assertTrue(self.app.error)
         self.assertFalse(self.app.get("download_button"))
         for button in self.app.button:
-            if button.label in {"테스트용 순서 적용", "믹스 만들기"}:
+            if button.label in {"자동 추천 순서 적용", "믹스 만들기"}:
                 self.assertTrue(button.disabled)
 
     def test_recommendation_and_export_share_content_analysis(self):
@@ -142,3 +145,44 @@ class SongOrderAppTests(unittest.TestCase):
             self.check_mix(1000, 1000)
             self.assertEqual(analyze.call_count, 1)
             self.assertTrue(plan.call_args.args[1]["b"].segments)
+
+    def test_part_a_recommendation_reaches_preview_and_wav(self):
+        import web_preview
+
+        rate = 8000
+        def tone(hz, amplitude):
+            second = b"".join(struct.pack("<h", round(amplitude * sin(2 * pi * hz * i / rate)))
+                              for i in range(rate))
+            return second * 10
+
+        low, mid, high = tone(180, 3800), tone(440, 9200), tone(980, 16800)
+        self.uploads.clear()
+        for song_id, pcm in [("end", mid + high), ("mid1", mid + mid),
+                             ("mid2", mid + mid), ("start", low + mid)]:
+            upload = BytesIO()
+            with wave.open(upload, "wb") as audio:
+                audio.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+                audio.writeframes(pcm)
+            upload.name = "same-name.wav"
+            upload.file_id = song_id
+            self.uploads.append(upload)
+
+        with patch.object(web_preview, "render_preview", wraps=web_preview.render_preview) as preview:
+            self.app.run()
+            button = next(b for b in self.app.button if b.label == "자동 추천 순서 적용")
+            button.click().run(timeout=90)
+            self.assertFalse(self.app.exception)
+            self.assertFalse(self.app.error)
+            order = list(self.app.session_state.song_order)
+            self.assertEqual((order[0], order[-1]), ("start", "end"))
+            self.assertCountEqual(order[1:-1], ["mid1", "mid2"])
+            self.assertEqual(len(self.app.session_state.part_a_cache), 3)
+            self.assertEqual(list(preview.call_args.args[0].order), order)
+            self.click("믹스 만들기")
+            self.assertTrue(self.app.get("download_button"))
+            output = Path(self.app.session_state.work_dir.name) / "melolink_mix.wav"
+            with wave.open(str(output), "rb") as audio:
+                self.assertEqual(audio.getnframes(), rate * 65)
+                self.assertEqual(audio.readframes(512), low[:1024])
+                audio.setpos(audio.getnframes() - 512)
+                self.assertEqual(audio.readframes(512), high[-1024:])
